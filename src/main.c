@@ -2,12 +2,15 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <cJSON.h>
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include <driver/gpio.h>
+
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,6 +31,7 @@
 #define WIFI_PASS      "suzyton0312"
 #define MAXIMUM_RETRY  (3)
 
+#define LED 2 //LED connected to GPIO2
 
 static EventGroupHandle_t s_wifi_event_group;
 
@@ -172,6 +176,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
         msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
         ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
+        
+        //Topico responsavel por receber os LEDs
+        msg_id = esp_mqtt_client_subscribe(client, "/led", 0);
+        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -190,8 +198,48 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-        printf("DATA=%.*s\r\n", event->data_len, event->data);
+        char received_topic[10];
+        if(event->topic_len < 10){
+            ESP_LOGI(TAG, "Topico menor que 10");
+            printf("TOPIC=%.*s TESTE\r\n", event->topic_len, event->topic);
+            snprintf(received_topic, event->topic_len+1, "%.*s", event->topic_len, event->topic);
+            printf("TOPICO APOS TRATADO=%s\r\n", received_topic);
+            printf("PRIMEIRA LETRA=%c\r\n", received_topic[0]);
+            printf("SEGUNDA LETRA=%c\r\n", received_topic[1]);
+            printf("TERCEIRA LETRA=%c\r\n", received_topic[2]);
+            printf("QUARTA LETRA=%c\r\n", received_topic[3]);
+        }
+        else{
+            ESP_LOGI(TAG, "Topico maior que 10");
+            snprintf(received_topic, 10, "%s", event->topic);
+        }
+        if(!(received_topic[0] =='/' && received_topic[1] == 'l' && received_topic[2] =='e' && received_topic[3] =='d')) {
+            ESP_LOGI(TAG, "received illegal topic, msg_id=%d, topic=%.*s", 
+                event->msg_id, event->topic_len,event->topic);
+            //Realizar tratamento de erro publicando no topico erro
+        }
+        else{
+            printf("TOPIC=%.*s TESTE\r\n", event->topic_len, event->topic);
+            printf("DATA=%.*s\r\n", event->data_len, event->data);
+            cJSON *root = cJSON_Parse(event->data); //Verificar tratamento de erro.
+            int action = cJSON_GetObjectItem(root, "action")->valueint;
+            if(action == 0) {
+                //Desliga o LED
+                ESP_LOGI(TAG, "Action received: Turn off LED");
+                gpio_set_level(LED, 0);
+            }
+            else if(action == 1) {
+                //Liga o LED
+                ESP_LOGI(TAG, "Action received: Turn on LED");
+                gpio_set_level(LED, 1);
+            }
+            else {
+                //Faz o tratamento de erro
+                ESP_LOGI(TAG, "Invalid Action");
+            }
+            //Realizar tratamento do data como JSON e chamar rotina de ativacao do LED
+            cJSON_Delete(root); //desaloca a memoria do JSON
+        }        
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -200,7 +248,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
             log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
             ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
-
         }
         break;
     default:
@@ -222,6 +269,16 @@ static void mqtt_app_start(void)
 
 void app_main(void)
 {
+
+    gpio_config_t io_config;
+    io_config.intr_type = GPIO_PIN_INTR_DISABLE;
+    io_config.mode = GPIO_MODE_OUTPUT;
+    io_config.pin_bit_mask = (1ULL << LED);
+    io_config.pull_down_en = 0;
+    io_config.pull_up_en = 0;
+    gpio_config(&io_config);
+    gpio_set_level(LED, 0); //Garante o level 0
+
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
