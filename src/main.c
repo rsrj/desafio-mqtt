@@ -1,3 +1,11 @@
+/*  DESAFIO MQTT
+    Descricao: resolucao do desafio proposto utilizando a comunicacao MQTT
+    com um broker publico para acionamento de um LED, ou o envio do endereco
+    MAC do dispositivo para o topico de erro caso a requisicao de acionamento
+    apresente erro.
+    Autor: Railton Silva Rocha Junior (rsrj)
+    Data: 16/02/2022
+*/
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -26,7 +34,7 @@
 
 #include "mqtt_client.h"
 
-/*Definindo as credenciais do AP*/
+/*Definindo as credenciais do STA*/
 #define WIFI_SSID      "Railton@THORFIBRA"
 #define WIFI_PASS      "suzyton0312"
 #define MAXIMUM_RETRY  (3)
@@ -103,9 +111,7 @@ void wifi_init_sta(void)
         .sta = {
             .ssid = WIFI_SSID,
             .password = WIFI_PASS,
-            /* Setting a password implies station will connect to all security modes including WEP/WPA.
-             * However these modes are deprecated and not advisable to be used. Incase your Access point
-             * doesn't support WPA2, these mode can be enabled by commenting below line */
+            /*Descomentar caso use autenticacao WP2*/
 	        //.threshold.authmode = WIFI_AUTH_WPA2_PSK,
 
             .pmf_cfg = {
@@ -120,16 +126,12 @@ void wifi_init_sta(void)
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
 
-    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-     * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
             WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
             pdFALSE,
             pdFALSE,
             portMAX_DELAY);
 
-    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-     * happened. */
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
                  WIFI_SSID, WIFI_PASS);
@@ -140,7 +142,6 @@ void wifi_init_sta(void)
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
 
-    /* The event will not be processed after unregister */
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
     vEventGroupDelete(s_wifi_event_group);
@@ -164,18 +165,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     int msg_id;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data_3", 0, 1, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
-
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-
-        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
         
         //Topico responsavel por receber os LEDs
         msg_id = esp_mqtt_client_subscribe(client, "/led", 0);
@@ -199,30 +188,29 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
         char received_topic[10];
+        //Garante que o topico recebido tem menos de 10 caracteres
         if(event->topic_len < 10){
-            ESP_LOGI(TAG, "Topico menor que 10");
-            printf("TOPIC=%.*s TESTE\r\n", event->topic_len, event->topic);
             snprintf(received_topic, event->topic_len+1, "%.*s", event->topic_len, event->topic);
-            printf("TOPICO APOS TRATADO=%s\r\n", received_topic);
-            printf("PRIMEIRA LETRA=%c\r\n", received_topic[0]);
-            printf("SEGUNDA LETRA=%c\r\n", received_topic[1]);
-            printf("TERCEIRA LETRA=%c\r\n", received_topic[2]);
-            printf("QUARTA LETRA=%c\r\n", received_topic[3]);
         }
         else{
-            ESP_LOGI(TAG, "Topico maior que 10");
             snprintf(received_topic, 10, "%s", event->topic);
         }
-        if(!(received_topic[0] =='/' && received_topic[1] == 'l' && received_topic[2] =='e' && received_topic[3] =='d')) {
+        //Verifica se o topico recebido corresponde ao desejado
+        if (strcmp(received_topic, "/led") != 0) {
             ESP_LOGI(TAG, "received illegal topic, msg_id=%d, topic=%.*s", 
                 event->msg_id, event->topic_len,event->topic);
-            //Realizar tratamento de erro publicando no topico erro
         }
         else{
-            printf("TOPIC=%.*s TESTE\r\n", event->topic_len, event->topic);
+            printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
             printf("DATA=%.*s\r\n", event->data_len, event->data);
-            cJSON *root = cJSON_Parse(event->data); //Verificar tratamento de erro.
-            int action = cJSON_GetObjectItem(root, "action")->valueint;
+            cJSON *root = cJSON_Parse(event->data); //Recupera a mensagem enviada
+            cJSON *obj_action = cJSON_GetObjectItem(root, "action"); //Verifica se existe a chave desejada
+            int action = 100; //Inicializa com um valor absurdo
+            if (obj_action != NULL) //Evita que se tente acessar um valor nulo
+            {
+               action = obj_action->valueint; //Recupera o comando recebido
+            }
+            
             if(action == 0) {
                 //Desliga o LED
                 ESP_LOGI(TAG, "Action received: Turn off LED");
@@ -235,9 +223,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             }
             else {
                 //Faz o tratamento de erro
+                uint8_t mac[6];
+                ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac)); //Recupera o endereco MAC do dispositivo
+                char mac_buffer[30];
+                sprintf(mac_buffer, "{\"mac\":\"%x:%x:%x:%x:%x:%x\"}", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]); 
+                ESP_LOGI(TAG, "%s", mac_buffer);
+                msg_id = esp_mqtt_client_publish(client, "/erro", mac_buffer, 0, 0, 0); //Publica no topico de erro
                 ESP_LOGI(TAG, "Invalid Action");
             }
-            //Realizar tratamento do data como JSON e chamar rotina de ativacao do LED
             cJSON_Delete(root); //desaloca a memoria do JSON
         }        
         break;
@@ -259,10 +252,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .uri = "mqtt://192.168.1.11", //Trocar pelo endereco do broker desejado
+        .uri = "mqtt://mqtt.eclipseprojects.io", //Utilizado broker publico do eclipse
     };
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
-    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(client);
 }
@@ -277,7 +269,7 @@ void app_main(void)
     io_config.pull_down_en = 0;
     io_config.pull_up_en = 0;
     gpio_config(&io_config);
-    gpio_set_level(LED, 0); //Garante o level 0
+    gpio_set_level(LED, 0);
 
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
@@ -291,7 +283,6 @@ void app_main(void)
     esp_log_level_set("TRANSPORT", ESP_LOG_VERBOSE);
     esp_log_level_set("OUTBOX", ESP_LOG_VERBOSE);
 
-    //Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
       ESP_ERROR_CHECK(nvs_flash_erase());
